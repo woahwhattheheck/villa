@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 253e73bd3d8f219bc167daab5a51bf9ae9c262dd
+          ref: 8e77758654f269e093ffdfcb62d889067569399a
 
       - uses: actions/checkout@v4
         with:
