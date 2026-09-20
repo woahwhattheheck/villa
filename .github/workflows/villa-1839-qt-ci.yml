@@ -50,9 +50,10 @@ jobs:
           set +e
           ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -V -R '^unified_browser_dialog$'
           ctest_status=$?
-          QT_QPA_PLATFORM=offscreen ./build/ci-windows-mingw/bin/test_unified_browser_dialog.exe -o -,txt -v2
+          QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=offscreen ./build/ci-windows-mingw/bin/test_unified_browser_dialog.exe -o qt-browser-test.txt,txt -v2
           binary_status=$?
           echo "CTest status: $ctest_status; binary status: $binary_status"
+          if test -f qt-browser-test.txt; then cat qt-browser-test.txt; else echo "QtTest output file absent"; fi
           cat build/ci-windows-mingw/Testing/Temporary/LastTest.log || true
           ldd build/ci-windows-mingw/bin/test_unified_browser_dialog.exe || true
           exit "$ctest_status"
