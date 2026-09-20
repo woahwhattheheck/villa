@@ -41,7 +41,7 @@ GPU-accelerated, containerized inference for ink detection models. The GPU image
 - `TILE_SIZE`: Sets both the tile extraction size and network input size. Larger values = more context but more memory. Should match training size for best results (typically 64)
 - `STRIDE`: Controls overlap between tiles. Smaller stride = more overlap = smoother blending but slower inference
 - `BATCH_SIZE`: Number of tiles to process in parallel. Larger values = faster but more GPU memory. Reduce if you encounter OOM errors
-- `resnet3d-152-3d-decoder`: Best aligned with the tracked 3D-decoder checkpoints when using `TILE_SIZE=256` and a 62-layer window such as `START_LAYER=1`, `END_LAYER=63`
+- `resnet3d-152-3d-decoder`: Best aligned with the tracked 3D-decoder checkpoints when using `TILE_SIZE=256` and a 62-layer window centered on the surface. For the published 109-layer 2 µm surface volumes, use `START_LAYER=24`, `END_LAYER=86`.
 
 ### S3 layout (expected)
 
@@ -317,8 +317,10 @@ argo submit wf.yaml \
   -p end_layer=26
 ```
 
-Tip:
+Tips:
 - `END_LAYER` is exclusive. For layers `00.tif` through `25.tif`, use `START_LAYER=0`, `END_LAYER=26`.
+- For `resnet3d-152-3d-decoder`, center the 62-layer production inference window on the surface volume. For an `N`-layer surface volume, use `START_LAYER = round((N - 62) / 2)` and `END_LAYER = START_LAYER + 62`; for the published 109-layer 2 µm volumes this is `24:86`.
+- The `START_LAYER=1`, `END_LAYER=63` values in the developer-only GPU checkpoint smoke above are only a 62-channel model-load check; they are not the recommended window for production inference on the published 109-layer surface volumes.
 
 ## Notes on models
 
