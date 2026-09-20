@@ -395,6 +395,14 @@ jobs:
         working-directory: volume-cartographer
         timeout-minutes: 2
         run: python3 core/test/test_render_tifxyz_logging.py build/ci-fast-cli/bin/vc_render_tifxyz
+      - name: Test obj2tifxyz zero-raster rejection
+        working-directory: volume-cartographer
+        timeout-minutes: 2
+        run: |
+          python3 core/test/test_obj2tifxyz_zero_raster.py \
+            build/ci-fast-cli/bin/vc_tifxyz2obj \
+            build/ci-fast-cli/bin/vc_obj2tifxyz \
+            core/test/data/segments/20241113070770
 
   flatboi-compile:
     name: Linux Flatboi/PaStiX compile coverage (Clang QuickBuild)
