@@ -1,0 +1,49 @@
+name: VC3D UNC path regression
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  windows-qt:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        working-directory: volume-cartographer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8dcd16b42674bed10a34973a03e3eb18b5fcfb2b
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ScrollPrize/vc3d-deps
+          ref: d84dfa0745dd2debbcec2126117878b241ffdb7f
+          path: vc3d-deps
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: Restore prebuilt MSYS2 dependencies
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          $env:GHCR_TOKEN | oras login ghcr.io -u '${{ github.actor }}' --password-stdin
+          oras pull ghcr.io/scrollprize/vc3d-deps/windows:sha-d84dfa0745dd2debbcec2126117878b241ffdb7f -o $env:RUNNER_TEMP
+          & "$env:GITHUB_WORKSPACE\vc3d-deps\windows\restore.ps1" `
+            -Archive "$env:RUNNER_TEMP\vc3d-windows-ucrt64.7z"
+
+      - name: Configure
+        run: cmake --preset ci-windows-mingw -DVC_USE_SCCACHE=OFF
+
+      - name: Build
+        run: ninja -C build/ci-windows-mingw
+
+      - name: Test unified browser Windows paths
+        run: ctest --test-dir build/ci-windows-mingw --output-on-failure -R '^unified_browser_dialog$'
