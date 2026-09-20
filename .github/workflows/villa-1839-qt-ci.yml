@@ -46,4 +46,13 @@ jobs:
         run: ninja -C build/ci-windows-mingw test_unified_browser_dialog
 
       - name: Test unified browser Windows paths
-        run: ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -V -R '^unified_browser_dialog$'
+        run: |
+          set +e
+          ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -V -R '^unified_browser_dialog$'
+          ctest_status=$?
+          QT_QPA_PLATFORM=offscreen ./build/ci-windows-mingw/bin/test_unified_browser_dialog.exe -v2
+          binary_status=$?
+          echo "CTest status: $ctest_status; binary status: $binary_status"
+          cat build/ci-windows-mingw/Testing/Temporary/LastTest.log || true
+          ldd build/ci-windows-mingw/bin/test_unified_browser_dialog.exe || true
+          exit "$ctest_status"
