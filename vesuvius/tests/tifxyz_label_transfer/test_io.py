@@ -9,16 +9,47 @@ from unittest import mock
 import numpy as np
 import tifffile
 
+from vesuvius.tifxyz_label_transfer import io as io_module
 from vesuvius.tifxyz_label_transfer.io import (
     load_surface,
     read_image,
     read_image_shape,
     StreamingTiffOutputs,
+    TemporaryRaster,
 )
 from tests.zarr_utils import create_v2_group_array
 
 
 class SurfaceIoTests(unittest.TestCase):
+    def test_temporary_raster_closes_mapping_before_unlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            raster = TemporaryRaster(
+                Path(temporary),
+                (3, 4),
+                np.dtype(np.uint8),
+                0,
+                ".owned-",
+            )
+            path = raster.path
+            mapping = raster.array._mmap
+
+            raster.close()
+
+            self.assertTrue(mapping.closed)
+            self.assertFalse(path.exists())
+
+    def test_windows_tiff_reader_returns_owned_array(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "label.tif"
+            expected = np.arange(12, dtype=np.uint8).reshape(3, 4)
+            tifffile.imwrite(path, expected, metadata=None)
+
+            with mock.patch.object(io_module.os, "name", "nt"):
+                actual = read_image(path)
+
+            self.assertNotIsInstance(actual, np.memmap)
+            np.testing.assert_array_equal(actual, expected)
+
     def test_streaming_tiffs_write_exact_edge_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
