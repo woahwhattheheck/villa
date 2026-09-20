@@ -580,8 +580,14 @@ def preview_cache_name(name: str, factor: int) -> str:
 
 
 def read_render_tiff(path: Path) -> np.ndarray:
-    """Open a cached render without copying the complete raster into RAM."""
+    """Open a cached render without copying it when the platform permits."""
 
+    # A returned mmap can legitimately outlive this helper.  POSIX can unlink
+    # the backing file while that mapping is alive; Windows cannot, which makes
+    # TemporaryDirectory cleanup fail with WinError 32.  Return owned storage
+    # there rather than leaking a source-file handle through the public API.
+    if sys.platform == "win32":
+        return tifffile.imread(path)
     try:
         return tifffile.memmap(path, mode="r")
     except (OSError, ValueError):
