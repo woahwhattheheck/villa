@@ -40,10 +40,10 @@ jobs:
             -Archive "$env:RUNNER_TEMP\vc3d-windows-ucrt64.7z"
 
       - name: Configure
-        run: cmake --preset ci-windows-mingw -DVC_USE_SCCACHE=OFF
+        run: cmake --preset ci-windows-mingw -DVC_USE_SCCACHE=OFF -DVC_TESTING=ON
 
       - name: Build
-        run: ninja -C build/ci-windows-mingw
+        run: ninja -C build/ci-windows-mingw test_unified_browser_dialog
 
       - name: Test unified browser Windows paths
-        run: ctest --test-dir build/ci-windows-mingw --output-on-failure -R '^unified_browser_dialog$'
+        run: ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -R '^unified_browser_dialog$'
