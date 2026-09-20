@@ -81,6 +81,13 @@
                 const int min_level = metadata.value("min-level", 0);
                 const int max_level = metadata.value("max-level", 0);
                 selected_level = std::clamp(requested_level, min_level, max_level);
+                if (selected_level != requested_level) {
+                    std::cerr << "warning: normal_grid_level=" << requested_level
+                              << " unavailable for multiscale normal-grid store at "
+                              << base_path << "; using level " << selected_level
+                              << " (available levels " << min_level << "-" << max_level
+                              << ")" << std::endl;
+                }
 
                 utils::Json level_metadata;
                 const std::string level_metadata_name =
@@ -105,6 +112,11 @@
                 const double level_step = metadata.value("spiral-step", 20.0);
                 output_spiral_step = level_step / coordinate_scale;
             } else {
+                if (requested_level != 0) {
+                    std::cerr << "warning: normal_grid_level=" << requested_level
+                              << " ignored; normal-grid store at " << base_path
+                              << " is single-scale; using level 0" << std::endl;
+                }
                 selected_level = 0;
                 sparse_volume = metadata.value("sparse-volume", 1);
                 output_spiral_step = metadata.value("spiral-step", 20.0);
