@@ -46,4 +46,4 @@ jobs:
         run: ninja -C build/ci-windows-mingw test_unified_browser_dialog
 
       - name: Test unified browser Windows paths
-        run: ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -R '^unified_browser_dialog$'
+        run: ctest --test-dir build/ci-windows-mingw --no-tests=error --output-on-failure -V -R '^unified_browser_dialog$'
