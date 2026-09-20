@@ -20,6 +20,12 @@ from .core import Surface
 
 
 def _read_tiff(path: Path) -> NDArray:
+    # Windows does not allow a TemporaryDirectory to remove a TIFF while an
+    # mmap of that file is still live.  These reader APIs return arrays whose
+    # lifetime is independent of the input path, so keep the zero-copy mmap
+    # fast path on POSIX and materialize an owned array on Windows.
+    if os.name == "nt":
+        return tifffile.imread(path)
     try:
         return tifffile.memmap(path, mode="r")
     except ValueError:
@@ -234,8 +240,13 @@ class TemporaryRaster:
         self.array[:] = fill_value
 
     def close(self) -> None:
-        self.array.flush()
-        del self.array
+        array = getattr(self, "array", None)
+        if array is not None:
+            array.flush()
+            mapping = getattr(array, "_mmap", None)
+            if mapping is not None:
+                mapping.close()
+            del self.array
         self.path.unlink(missing_ok=True)
 
     def __enter__(self) -> "TemporaryRaster":
