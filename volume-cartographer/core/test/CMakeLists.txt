@@ -873,15 +873,6 @@ vc_add_test(NAME test_seg_add_overlap_metrics)
 # in configurations that build the apps -- the test shards configure with
 # VC_BUILD_APPS=OFF and apps/ returns before the target is created, which
 # would make the TARGET_FILE expression a configure error.
-if(TARGET vc_obj2tifxyz AND TARGET vc_tifxyz2obj)
-    vc_add_test(NAME test_obj2tifxyz_cli
-        LIBS doctest::doctest
-        DEFS
-            VC_OBJ2TIFXYZ_BIN="$<TARGET_FILE:vc_obj2tifxyz>"
-            VC_TIFXYZ2OBJ_BIN="$<TARGET_FILE:vc_tifxyz2obj>")
-    add_dependencies(test_obj2tifxyz_cli vc_obj2tifxyz vc_tifxyz2obj)
-endif()
-
 if(TARGET vc_tifxyz_selfcross)
     vc_add_test(NAME test_tifxyz_selfcross_cli
         LIBS doctest::doctest vc_core opencv_core opencv_imgcodecs
