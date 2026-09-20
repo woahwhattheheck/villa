@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -93,6 +94,22 @@ TEST_CASE("Constructor + metadata accessor")
     NormalGridVolume v(d.string());
     CHECK(v.metadata().is_object());
     CHECK(v.metadata()["sparse-volume"].get_int64() == 8);
+    fs::remove_all(d);
+}
+
+TEST_CASE("requested normal-grid level fallback is explicit")
+{
+    auto d = makeEmptyNgvDir("level_fallback");
+    std::ostringstream captured;
+    auto* old = std::cerr.rdbuf(captured.rdbuf());
+    {
+        NormalGridVolume v(d.string(), 2);
+        CHECK(v.level() == 0);
+    }
+    std::cerr.rdbuf(old);
+    CHECK(captured.str().find("normal_grid_level=2") != std::string::npos);
+    CHECK(captured.str().find("single-scale") != std::string::npos);
+    CHECK(captured.str().find("using level 0") != std::string::npos);
     fs::remove_all(d);
 }
 
