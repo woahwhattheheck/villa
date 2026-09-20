@@ -365,6 +365,18 @@ class SurfaceVolumeCompositeTests(unittest.TestCase):
             self.assertIsInstance(actual, np.memmap)
             np.testing.assert_array_equal(actual, expected)
 
+    def test_windows_render_cache_does_not_leak_file_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "render.tif"
+            expected = np.arange(12, dtype=np.uint8).reshape(3, 4)
+            tifffile.imwrite(path, expected, metadata=None)
+
+            with mock.patch.object(viewer.sys, "platform", "win32"):
+                actual = viewer.read_render_tiff(path)
+
+            self.assertNotIsInstance(actual, np.memmap)
+            np.testing.assert_array_equal(actual, expected)
+
     def test_centered_thirteen_plane_max_selects_six_each_side(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             cache = Path(temp_dir) / "middle13.tif"
