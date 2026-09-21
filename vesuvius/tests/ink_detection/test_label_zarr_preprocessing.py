@@ -197,37 +197,35 @@ def test_unstreamable_codec_falls_back_without_error(tmp_path):
     assert group["0"][DEFAULT_LABEL_SLICE].shape == image_YX.shape
 
 
-def test_multipage_tiff_is_left_to_the_existing_path_unchanged(tmp_path):
-    """Multi-page TIFFs are explicitly out of scope for this change.
-
-    The rest of this module assumes a single flat 2D label image; converting
-    a genuine multi-page file already produces silently wrong output on the
-    pre-existing in-memory path today (tifffile.imread stacks pages, and the
-    channel-squeeze logic then mistakes the page axis for height). That bug
-    is real but separate, and this PR does not fix it -- it only guarantees
-    not to touch multi-page behaviour at all, so the streaming gate must
-    return "false" (unchanged from before this PR) for any multi-page input,
-    whether tiled or striped.
-    """
+@pytest.mark.parametrize("tiled", [False, True])
+def test_multipage_tiff_is_rejected_before_conversion(tmp_path, tiled):
+    """A page stack is not a channel image and must never be flattened silently."""
     label_path = tmp_path / "segment-a_multipage_supervision_mask.tif"
-    # z=5, not 3 or 4: tifffile's imwrite heuristically treats a leading axis
-    # of exactly 3 or 4 on a uint8 array as RGB(A) color planes and writes ONE
-    # page instead of several -- confirmed by hitting that ambiguity with
-    # z=3 while writing this test, which is itself a small illustration of
-    # how easy it is to end up with an unintended single-page file.
     volume_ZYX = np.random.default_rng(2).integers(
         0, 2, size=(5, 20, 30), dtype=np.uint8
     )
-    tifffile.imwrite(label_path, volume_ZYX)  # writes 5 separate pages
+
+    with tifffile.TiffWriter(label_path) as tif:
+        for page_YX in volume_ZYX:
+            if tiled:
+                tif.write(page_YX, tile=(16, 16))
+            else:
+                tif.write(page_YX)
 
     with tifffile.TiffFile(label_path) as tif:
         assert len(tif.pages) == 5, "fixture must actually be multi-page"
+        assert all(page.is_tiled == tiled for page in tif.pages)
 
-    result = convert_image(label_path, levels=1)
-    assert result["streamed_tiled_tiff"] == "false"
+    with pytest.raises(
+        ValueError,
+        match=r"multi-page TIFF \(5 pages\).*expects one 2D label image per file",
+    ):
+        convert_image(label_path, levels=1)
+
+    assert not label_path.with_suffix(".zarr").exists()
 
 
-def test_one_row_strip_streams_correctly(tmp_path):
+def test_one_row_strip_streams_correctly(tmp_path):def test_one_row_strip_streams_correctly(tmp_path):
     """A strip containing exactly one row must not lose its row axis.
 
     ``page.decode`` returns ``(depth, rows, columns, samples)``; when
