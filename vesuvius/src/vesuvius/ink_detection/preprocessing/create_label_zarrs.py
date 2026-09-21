@@ -139,10 +139,22 @@ def _normalized_2d_shape(
     return int(squeezed[0]), int(squeezed[1])
 
 
+def _require_single_page_tiff(tif: tifffile.TiffFile, path: Path) -> None:
+    """Reject TIFF stacks before a page axis can be mistaken for image data."""
+    page_count = len(tif.pages)
+    if page_count != 1:
+        raise ValueError(
+            f"{path} is a multi-page TIFF ({page_count} pages); "
+            "create_label_zarrs expects one 2D label image per file"
+        )
+
+
 def load_image(path: Path) -> np.ndarray:
     """Read a TIFF or PNG as one contiguous two-dimensional array."""
     if path.suffix.lower() in {".tif", ".tiff"}:
-        image = tifffile.imread(path)
+        with tifffile.TiffFile(path) as tif:
+            _require_single_page_tiff(tif, path)
+            image = tif.pages[0].asarray()
     else:
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if image is None:
@@ -293,6 +305,7 @@ def _get_streamable_tiff_metadata(
     if path.suffix.lower() not in {".tif", ".tiff"}:
         return None
     with tifffile.TiffFile(path) as tif:
+        _require_single_page_tiff(tif, path)
         page = tif.pages[0]
         if page.is_tiled:
             # Tiled input streamed before this change, unconditionally. Leave
@@ -302,14 +315,6 @@ def _get_streamable_tiff_metadata(
 
         # Striped input is what this change adds. The two conditions below
         # apply only to it.
-        if len(tif.pages) != 1:
-            # The rest of this module -- _normalize_to_2d,
-            # _normalized_2d_shape, _create_ome_zarr_datasets(image_shape:
-            # tuple[int, int]) -- is built for a single flat 2D label image.
-            # A genuine multi-page file already produces silently wrong output
-            # on the in-memory path today, independent of this change; that is
-            # a separate bug and this PR does not touch it.
-            return None
         if page.compression not in _STREAMABLE_COMPRESSIONS:
             # Some codecs (notably old-style JPEG, compression 6) need
             # cross-block state tifffile does not expose per-block, so a block
