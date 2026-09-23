@@ -225,7 +225,7 @@ def test_multipage_tiff_is_rejected_before_conversion(tmp_path, tiled):
     assert not label_path.with_suffix(".zarr").exists()
 
 
-def test_one_row_strip_streams_correctly(tmp_path):def test_one_row_strip_streams_correctly(tmp_path):
+def test_one_row_strip_streams_correctly(tmp_path):
     """A strip containing exactly one row must not lose its row axis.
 
     ``page.decode`` returns ``(depth, rows, columns, samples)``; when
@@ -279,32 +279,12 @@ def test_every_strip_one_row_streams_correctly(tmp_path):
     np.testing.assert_array_equal(group["0"][DEFAULT_LABEL_SLICE], image_YX)
 
 
-def test_tiled_input_streams_regardless_of_page_count_and_codec(tmp_path):
-    """Tiled input streamed unconditionally before this PR; it still must.
+def test_single_page_tiled_input_streams_regardless_of_codec(tmp_path):
+    """Valid single-page tiled input keeps its existing codec behavior.
 
-    The first version of this change gated *both* tiled and striped input on a
-    single-page check and a codec whitelist. That silently sent tiled
-    multi-page files, and tiled files using a codec outside the whitelist,
-    back to the in-memory path they had always been exempt from -- which is
-    the allocation #1231 reports. Both are regressions rather than new
-    behaviour, so they are asserted here explicitly.
+    Multi-page tiled rejection is covered by the parameterized rejection
+    case above; a single-page codec outside the striped whitelist still streams.
     """
-    multipage_path = tmp_path / "segment-a_multipage_supervision_mask.tif"
-    volume_ZYX = np.random.default_rng(2).integers(
-        0, 2, size=(5, 32, 48), dtype=np.uint8
-    )
-    tifffile.imwrite(multipage_path, volume_ZYX, tile=(16, 16))
-    with tifffile.TiffFile(multipage_path) as tif:
-        assert len(tif.pages) == 5, "fixture must actually be multi-page"
-        assert tif.pages[0].is_tiled, "fixture must actually be tiled"
-
-    result = convert_image(multipage_path, levels=1)
-    assert result["streamed_tiled_tiff"] == "true"
-    group = zarr.open_group(multipage_path.with_suffix(".zarr"), mode="r")
-    np.testing.assert_array_equal(
-        group["0"][DEFAULT_LABEL_SLICE], volume_ZYX[0]
-    )
-
     zstd_path = tmp_path / "segment-b_supervision_mask.tif"
     image_YX = np.arange(32 * 48, dtype=np.uint16).reshape(32, 48)
     tifffile.imwrite(zstd_path, image_YX, tile=(16, 16), compression="zstd")
