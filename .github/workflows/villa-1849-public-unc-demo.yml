@@ -71,10 +71,12 @@ jobs:
             comparison = 'Standard installer snapshots, not pure-patch paired builds: published baseline versus accepted upstream merge, not the contribution-head binary. Relevant accepted fix blobs match the contribution head; unrelated revision differences remain.'
             data_context = 'https://scrollprize.org/data_datasets'
             data_attribution = 'https://scrollprize.org/data'
-            data_license = 'https://creativecommons.org/licenses/by-nc/4.0/'
+            data_license = 'https://dl.ash2txt.org/LICENSE.txt'
+            data_terms = 'The dataset README links the data-server terms. This evidence does not redistribute the TIFF input or reveal hidden text.'
+            data_credit = 'PHercParis4 (Scroll 1), Vesuvius Challenge spiral-input dataset, outer_shell segment s1_2um_outer. The linked data-server terms credit EduceLab-Scrolls; copyright EduceLab/The University of Kentucky. Reference: Parsons et al. (2023), https://doi.org/10.48550/arXiv.2304.02084. Exact underlying scan ID/date is not supplied by this segment metadata.'
             scan_citation = 'Not established by the supplied segment metadata; no creator or scan ID inferred.'
             eligibility = 'Source demonstration only; no prize-entry or eligibility claim.'
-            scope = 'Actual Windows GUI navigation and segment attachment over an existing local UNC share. No WSL, full geometry rendering, or reading-speed claim.'
+            scope = 'Actual Windows GUI navigation and segment attachment over an existing local UNC share. Evidence contains operational controls and segment-tree registration only, excluding viewer geometry and source data imagery. No WSL, full geometry rendering, or reading-speed claim.'
             installers = @()
             data_files = @()
           }
@@ -196,13 +198,21 @@ jobs:
               $manifest.attribution_readme = @{ url=$readmeUrl; status='unavailable'; error=$_.Exception.Message }
               Write-Warning 'Official README could not be retained. Source/license links and unresolved scan citation remain explicit.'
             }
+            $licenseUrl = 'https://dl.ash2txt.org/LICENSE.txt'
+            $licensePath = Join-Path $evidence 'PHercParis4-official-LICENSE.txt'
+            $licenseResponse = $dataClient.GetAsync($licenseUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            try { Save-ResponseBody $licenseResponse $licensePath 262144 } finally { $licenseResponse.Dispose() }
+            $manifest.attribution_license = @{
+              url=$licenseUrl; status='retained'; bytes=(Get-Item -LiteralPath $licensePath).Length;
+              sha256=(Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
             Save-Manifest
           } finally { $dataClient.Dispose() }
           $segmentMeta = Get-Content -LiteralPath (Join-Path $env:VILLA1849_SEGMENT 'meta.json') -Raw | ConvertFrom-Json
           if ($segmentMeta.format -ne 'tifxyz' -or $segmentMeta.type -ne 'seg' -or $segmentMeta.uuid -ne 's1_2um_outer') {
             throw 'Public segment metadata does not match the source-reviewed input.'
           }
-          $manifest.segment_metadata = $segmentMeta
+          $manifest.segment_identity = @{ uuid=$segmentMeta.uuid; format=$segmentMeta.format; type=$segmentMeta.type }
           Save-Manifest
           "VILLA1849_BASELINE_EXE=$($executables.baseline)" >> $env:GITHUB_ENV
           "VILLA1849_ACCEPTED_EXE=$($executables.accepted)" >> $env:GITHUB_ENV
@@ -224,4 +234,4 @@ jobs:
           name: villa1849-public-unc-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/villa1849-public-unc/evidence/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

@@ -16,6 +16,15 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class Villa1849Native {
+    public sealed class WindowInfo {
+        public IntPtr Handle; public string Title; public int Left, Top, Right, Bottom;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(WindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RECT bounds);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int capacity);
     [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
         public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo;
     }
@@ -42,6 +51,19 @@ public static class Villa1849Native {
     public static uint ForegroundProcessId() {
         uint id; GetWindowThreadProcessId(GetForegroundWindow(), out id); return id;
     }
+    public static WindowInfo[] OwnedWindows(uint processId) {
+        var windows = new System.Collections.Generic.List<WindowInfo>();
+        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner != processId || !IsWindowVisible(window)) return true;
+            RECT bounds; if (!GetWindowRect(window, out bounds)) return true;
+            var title = new System.Text.StringBuilder(512); GetWindowText(window, title, title.Capacity);
+            var info = new WindowInfo(); info.Handle=window; info.Title=title.ToString();
+            info.Left=bounds.Left; info.Top=bounds.Top; info.Right=bounds.Right; info.Bottom=bounds.Bottom;
+            windows.Add(info); return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
     private static void Send(INPUT[] inputs) {
         if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) != inputs.Length)
             throw new InvalidOperationException("Native input was not accepted by the interactive desktop.");
@@ -51,6 +73,8 @@ public static class Villa1849Native {
         input.data.ki.dwFlags = up ? 2u : 0u; return input;
     }
     public static void SelectAll() { Send(new INPUT[] {Key(0x11,false),Key(0x41,false),Key(0x41,true),Key(0x11,true)}); }
+    public static void Press(ushort key) { Send(new INPUT[] {Key(key,false),Key(key,true)}); }
+    public static void AltFile() { Send(new INPUT[] {Key(0x12,false),Key(0x46,false),Key(0x46,true),Key(0x12,true)}); }
     public static void Text(string text) {
         foreach (char c in text) {
             INPUT down = new INPUT(); down.type = 1; down.data.ki.wScan = c; down.data.ki.dwFlags = 4;
@@ -93,11 +117,22 @@ function Wait-For([scriptblock]$Probe, [string]$Description, [int]$Seconds=25) {
     throw "Timed out after ${Seconds}s waiting for $Description"
 }
 function Get-OwnedElements([int]$AppProcessId, $Root=$null) {
-    if (!$Root) { $Root = [Windows.Automation.AutomationElement]::RootElement }
-    $condition = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ProcessIdProperty, $AppProcessId)
-    return $Root.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+    # Qt menu popups are separate native top-level windows. Scope each UIA
+    # subtree through a Win32-verified process-owned handle, including the root.
+    if ($Root) {
+        $Root
+        $Root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+        return
+    }
+    foreach ($native in [Villa1849Native]::OwnedWindows($AppProcessId)) {
+        try {
+            $ownedRoot = [Windows.Automation.AutomationElement]::FromHandle($native.Handle)
+            $ownedRoot
+            $ownedRoot.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+        } catch [Windows.Automation.ElementNotAvailableException] { }
+    }
 }
-function Clean-Name([string]$Name) { return ($Name.Replace('&','') -replace '\.{3}$|\u2026$','').Trim() }
+function Clean-Name([string]$Name) { return (($Name -split "`t",2)[0].Replace('&','') -replace '\.{3}$|\u2026$','').Trim() }
 function Find-Control([int]$AppProcessId, [string]$Name, [string]$Type='', $Root=$null) {
     foreach ($element in (Get-OwnedElements $AppProcessId $Root)) {
         try {
@@ -121,7 +156,7 @@ function Focus-Window($Window, [int]$AppProcessId) {
     if ($handle -eq [IntPtr]::Zero) { throw 'The target top-level window has no native handle.' }
     [void][Villa1849Native]::ShowWindow($handle, 9)
     [void][Villa1849Native]::SetForegroundWindow($handle)
-    [void](Wait-For { [Villa1849Native]::ForegroundProcessId() -eq $AppProcessId } 'VC3D foreground ownership' 5)
+    [void](Wait-For { [Villa1849Native]::GetForegroundWindow() -eq $handle -and [Villa1849Native]::ForegroundProcessId() -eq $AppProcessId } 'exact VC3D window foreground' 5)
 }
 function Click-Control($Element, [int]$AppProcessId) {
     if ([Villa1849Native]::ForegroundProcessId() -ne $AppProcessId) { throw 'Refusing input outside the owned VC3D process.' }
@@ -139,25 +174,31 @@ function Type-Into($Element, [string]$Text, [int]$AppProcessId) {
     [Villa1849Native]::Text($Text)
     [void](Wait-For { (Get-EditValue $Element) -ceq $Text } 'actual typed text readback' 10)
 }
-function Capture-OwnedWindow([int]$AppProcessId, [string]$Path) {
-    $desktop = [Windows.Forms.SystemInformation]::VirtualScreen
-    $condition = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ProcessIdProperty, $AppProcessId)
-    $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children, $condition)
-    $bounds = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($window in $windows) {
-        try {
-            $c = $window.Current
-            $r = $c.BoundingRectangle
-            if (!$c.IsOffscreen -and $c.NativeWindowHandle -ne 0 -and $r.Width -ge 2 -and $r.Height -ge 2) {
-                $bounds.Add(@{name=$c.Name;left=$r.Left;top=$r.Top;right=$r.Right;bottom=$r.Bottom})
-            }
-        } catch [Windows.Automation.ElementNotAvailableException] { }
+function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) {
+    if (!$Target) { throw 'No explicit operational control capture target supplied.' }
+    $c = $Target.Current
+    $name = Clean-Name $c.Name
+    $allowedDialog = $c.ControlType -eq [Windows.Automation.ControlType]::Window -and $name -in @('New Project','Attach Segments')
+    $allowedTree = $c.ControlType -eq [Windows.Automation.ControlType]::Tree
+    if (!$allowedDialog -and !$allowedTree) { throw 'Capture is restricted to operational project/attachment dialogs or the segment tree.' }
+    $ancestor = $Target
+    $owned = $false
+    for ($depth=0; $depth -lt 30 -and $ancestor; $depth++) {
+        $handle = [IntPtr]$ancestor.Current.NativeWindowHandle
+        if ($handle -ne [IntPtr]::Zero) {
+            [uint32]$owner = 0
+            [void][Villa1849Native]::GetWindowThreadProcessId($handle, [ref]$owner)
+            if ($owner -eq $AppProcessId) { $owned=$true; break }
+        }
+        $ancestor = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
     }
-    if ($bounds.Count -eq 0) { throw 'No visible owned VC3D top-level window to capture.' }
-    $left = [Math]::Max($desktop.Left, [Math]::Floor(($bounds | Measure-Object left -Minimum).Minimum))
-    $top = [Math]::Max($desktop.Top, [Math]::Floor(($bounds | Measure-Object top -Minimum).Minimum))
-    $right = [Math]::Min($desktop.Right, [Math]::Ceiling(($bounds | Measure-Object right -Maximum).Maximum))
-    $bottom = [Math]::Min($desktop.Bottom, [Math]::Ceiling(($bounds | Measure-Object bottom -Maximum).Maximum))
+    if (!$owned -or $c.IsOffscreen) { throw 'Capture target is not a visible owned application control.' }
+    $desktop = [Windows.Forms.SystemInformation]::VirtualScreen
+    $rect = $c.BoundingRectangle
+    $left = [Math]::Max($desktop.Left, [Math]::Floor($rect.Left))
+    $top = [Math]::Max($desktop.Top, [Math]::Floor($rect.Top))
+    $right = [Math]::Min($desktop.Right, [Math]::Ceiling($rect.Right))
+    $bottom = [Math]::Min($desktop.Bottom, [Math]::Ceiling($rect.Bottom))
     $width = [int]($right - $left)
     $height = [int]($bottom - $top)
     if ($width -lt 2 -or $height -lt 2) { throw 'Owned application bounds are outside the visible desktop.' }
@@ -167,7 +208,7 @@ function Capture-OwnedWindow([int]$AppProcessId, [string]$Path) {
         $graphics.CopyFromScreen([int]$left, [int]$top, 0, 0, $bitmap.Size)
         $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
-    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;owned_windows=$bounds.ToArray();scope='Owned VC3D top-level main/modal window bounds only'}
+    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;scope='Actual operational dialog or segment-tree pixels only; no viewer/geometry capture'}
 }
 function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
     $rows = New-Object 'System.Collections.Generic.List[object]'
@@ -176,15 +217,27 @@ function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
         try {
             $c = $element.Current
             if ($c.IsOffscreen) { continue }
-            $rows.Add([ordered]@{name=$c.Name;automation_id=$c.AutomationId;type=$c.ControlType.ProgrammaticName;enabled=$c.IsEnabled;bounds=$c.BoundingRectangle.ToString()})
+            $rows.Add([ordered]@{name=$c.Name;automation_id=$c.AutomationId;type=$c.ControlType.ProgrammaticName;process_id=$c.ProcessId;native_handle=$c.NativeWindowHandle;enabled=$c.IsEnabled;bounds=$c.BoundingRectangle.ToString()})
         } catch [Windows.Automation.ElementNotAvailableException] { }
     }
     Write-Json $rows.ToArray() $Path
 }
-function Snapshot([int]$AppProcessId, [string]$Directory, [string]$Label) {
-    $capture = Capture-OwnedWindow $AppProcessId (Join-Path $Directory "$Label.png")
-    Write-Json $capture (Join-Path $Directory "$Label.capture.json")
-    Save-UiSnapshot $AppProcessId (Join-Path $Directory "$Label.ui.json")
+function Snapshot([int]$AppProcessId, [string]$Directory, [string]$Label, $CaptureTarget=$null, [switch]$BestEffort) {
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $inventory = @([Villa1849Native]::OwnedWindows($AppProcessId) | ForEach-Object { @{handle=$_.Handle.ToInt64();title=$_.Title;left=$_.Left;top=$_.Top;right=$_.Right;bottom=$_.Bottom} })
+        Write-Json $inventory (Join-Path $Directory "$Label.windows.json")
+    } catch { $errors.Add(@{part='native_windows';error=$_.ToString()}) }
+    try { Save-UiSnapshot $AppProcessId (Join-Path $Directory "$Label.ui.json") }
+    catch { $errors.Add(@{part='uia';error=$_.ToString()}) }
+    if ($CaptureTarget) {
+        try {
+            $capture = Capture-OperationalControl $AppProcessId $CaptureTarget (Join-Path $Directory "$Label.png")
+            Write-Json $capture (Join-Path $Directory "$Label.capture.json")
+        } catch { $errors.Add(@{part='capture';error=$_.ToString()}) }
+    }
+    Write-Json @{errors=$errors.ToArray();capture_requested=[bool]$CaptureTarget;scope='Independent native-window/UIA diagnostics; screenshots only for explicit operational controls.'} (Join-Path $Directory "$Label.diagnostics.json")
+    if ($errors.Count -gt 0 -and !$BestEffort) { throw "Evidence diagnostics failed at $Label; see retained diagnostics.json" }
 }
 function Normalize-Local([string]$Path) {
     return [IO.Path]::GetFullPath($Path.Replace('/','\')).TrimEnd('\')
@@ -224,12 +277,34 @@ function Close-OwnedApp {
         }
     } finally { $script:OwnedProcess = $null; $app.Dispose() }
 }
-function Open-MenuAction($MainWindow, [int]$AppProcessId, [string]$Action) {
+function Close-ObservedStartupCatalog([int]$AppProcessId, [string]$Directory) {
+    foreach ($native in [Villa1849Native]::OwnedWindows($AppProcessId)) {
+        if ($native.Title -ceq 'Open Data Catalog') {
+            Snapshot $AppProcessId $Directory 'startup-catalog-observed' -BestEffort
+            $catalog = [Windows.Automation.AutomationElement]::FromHandle($native.Handle)
+            Focus-Window $catalog $AppProcessId
+            $close = Wait-For { Find-Control $AppProcessId 'Close' 'Button' $catalog } 'observed catalog Close button' 10
+            Click-Control $close $AppProcessId
+            [void](Wait-For { @([Villa1849Native]::OwnedWindows($AppProcessId) | Where-Object { $_.Handle -eq $native.Handle }).Count -eq 0 } 'catalog dismissal' 10)
+            Record 'closed_observed_startup_catalog' @{title=$native.Title;handle=$native.Handle.ToInt64();settings_changed=$false}
+        }
+    }
+}
+function Open-MenuAction($MainWindow, [int]$AppProcessId, [string]$Action, [string]$Directory) {
+    Close-ObservedStartupCatalog $AppProcessId $Directory
     Focus-Window $MainWindow $AppProcessId
     $file = Wait-For { Find-Control $AppProcessId 'File' 'MenuItem' $MainWindow } 'File menu'
-    Click-Control $file $AppProcessId
-    $item = Wait-For { Find-Control $AppProcessId $Action 'MenuItem' } "File > $Action"
-    Click-Control $item $AppProcessId
+    if ($Action -notin @('New Project','Attach Segments')) { throw 'No source-mapped menu action.' }
+    # Use the actual native menu keyboard path, not direct application calls.
+    # Both pins put New Project first and Attach Segments fifth (separators
+    # skipped). N is a duplicated mnemonic; Home is unambiguous.
+    [Villa1849Native]::AltFile()
+    Snapshot $AppProcessId $Directory ('menu-' + $Action.Replace(' ','') + '-opened') -BestEffort
+    if ([Villa1849Native]::ForegroundProcessId() -ne $AppProcessId) { throw 'Owned app lost menu input focus.' }
+    [Villa1849Native]::Press(0x24)
+    if ($Action -eq 'Attach Segments') { for ($i=0; $i -lt 4; $i++) { [Villa1849Native]::Press(0x28) } }
+    [Villa1849Native]::Press(0x0D)
+    Record 'native_file_menu_action' @{action=$Action;path=$(if ($Action -eq 'New Project') {'Alt+F, Home, Enter'} else {'Alt+F, Home, Down x4, Enter'});result='Awaiting actual dialog; not yet success'}
 }
 function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$UncPath, [string]$FileUri, [string]$SegmentId) {
     $directory = Join-Path $EvidenceDirectory $Label
@@ -240,13 +315,19 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
     Record 'launch' @{case=$Label;exe=$Exe;sha256=(Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash;arguments=@()}
     $script:OwnedProcess = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -PassThru -RedirectStandardOutput (Join-Path $directory 'app.stdout.log') -RedirectStandardError (Join-Path $directory 'app.stderr.log')
     $appProcessId = $script:OwnedProcess.Id
+    $captureTarget = $null
     try {
         $main = Wait-For {
-            $script:OwnedProcess.Refresh()
-            if ($script:OwnedProcess.MainWindowHandle -ne 0) { [Windows.Automation.AutomationElement]::FromHandle($script:OwnedProcess.MainWindowHandle) }
-        } 'VC3D main window' 60
-        Open-MenuAction $main $appProcessId 'New Project'
+            foreach ($native in [Villa1849Native]::OwnedWindows($appProcessId)) {
+                if ($native.Title -ceq 'Open Data Catalog') { continue }
+                $candidateWindow = [Windows.Automation.AutomationElement]::FromHandle($native.Handle)
+                if (Find-Control $appProcessId 'File' 'MenuItem' $candidateWindow) { return $candidateWindow }
+            }
+        } 'owned VC3D main window with File menu' 60
+        Snapshot $appProcessId $directory '00-startup' -BestEffort
+        Open-MenuAction $main $appProcessId 'New Project' $directory
         $saveDialog = Wait-For { Find-Control $appProcessId 'New Project' 'Window' } 'New Project dialog'
+        $captureTarget = $saveDialog
         Focus-Window $saveDialog $appProcessId
         $fileEdit = Wait-For {
             $edits = @(Get-OwnedElements $appProcessId $saveDialog | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and !$_.Current.IsOffscreen })
@@ -256,7 +337,7 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             if ($matchingEdits.Count -eq 1) { return $matchingEdits[0] }
         } 'source-identified project filename edit'
         Type-Into $fileEdit $projectPath $appProcessId
-        Snapshot $appProcessId $directory '01-new-project'
+        Snapshot $appProcessId $directory '01-new-project' $captureTarget
         $saveButton = Wait-For { Find-Control $appProcessId 'Save' 'Button' $saveDialog } 'project Save button'
         Click-Control $saveButton $appProcessId
         $empty = Wait-For {
@@ -266,15 +347,17 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
         if (@($empty.volumes).Count -ne 0 -or @($empty.segments).Count -ne 0) { throw 'New Project did not produce a genuine empty project.' }
         Copy-Item -LiteralPath $projectPath -Destination (Join-Path $directory 'project-before.json')
         Record 'empty_project_created_by_gui' @{case=$Label;path=$projectPath}
-        Open-MenuAction $main $appProcessId 'Attach Segments'
+        $captureTarget = $null
+        Open-MenuAction $main $appProcessId 'Attach Segments' $directory
         $attachDialog = Wait-For { Find-Control $appProcessId 'Attach Segments' 'Window' } 'actual Attach Segments dialog'
+        $captureTarget = $attachDialog
         Focus-Window $attachDialog $appProcessId
         $pathEdit = Wait-For {
             $edits = @(Get-OwnedElements $appProcessId $attachDialog | Where-Object { $_.Current.ControlType -eq [Windows.Automation.ControlType]::Edit -and !$_.Current.IsOffscreen })
             if ($edits.Count -eq 1) { return $edits[0] }
         } 'single path edit in Attach Segments'
         Type-Into $pathEdit $FileUri $appProcessId
-        Snapshot $appProcessId $directory '02-typed-identical-unc-uri'
+        Snapshot $appProcessId $directory '02-typed-identical-unc-uri' $captureTarget
         Record 'typed_uri_read_back' @{case=$Label;uri=(Get-EditValue $pathEdit)}
         $openButton = Wait-For { Find-Control $appProcessId 'Open' 'Button' $attachDialog } 'actual Open button'
         Click-Control $openButton $appProcessId
@@ -285,7 +368,7 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
                 }
                 if (Is-Attached (Read-Project $projectPath) $UncPath) { throw 'Baseline unexpectedly attached the URI; this is not a failing before case.' }
             } 'baseline visible No such path result'
-            Snapshot $appProcessId $directory '03-baseline-path-error'
+            Snapshot $appProcessId $directory '03-baseline-path-error' $captureTarget
             $after = Read-Project $projectPath
             if (@($after.segments).Count -ne 0 -or @($after.volumes).Count -ne 0) { throw 'Baseline changed the empty project unexpectedly.' }
             Copy-Item -LiteralPath $projectPath -Destination (Join-Path $directory 'project-after.json')
@@ -299,6 +382,7 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             if ($warning) { throw 'The accepted application reported Attach failed.' }
             Is-Attached (Read-Project $projectPath) $UncPath
         } 'persisted real UNC segment attachment' 45)
+        $captureTarget = $null
         $row = Wait-For { Find-Control $appProcessId $SegmentId } 'actual public segment row' 45
         Focus-Window $main $appProcessId
         Click-Control $row $appProcessId
@@ -313,16 +397,23 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             }
             return $false
         } 'selected rendered segment row' 10
-        Snapshot $appProcessId $directory '03-accepted-attached-selected'
+        $captureTarget = $row
+        for ($depth=0; $depth -lt 20 -and $captureTarget -and $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree; $depth++) {
+            $captureTarget = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($captureTarget)
+        }
+        if (!$captureTarget -or $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree) { throw 'Selected segment has no identifiable operational tree for evidence capture.' }
+        Snapshot $appProcessId $directory '03-accepted-attached-selected' $captureTarget
         Copy-Item -LiteralPath $projectPath -Destination (Join-Path $directory 'project-after.json')
         $project = Read-Project $projectPath
         if (!(Is-Attached $project $UncPath)) { throw 'Persisted project changed after selection.' }
         Record 'accepted_observed_attachment' @{segment_id=$SegmentId;selected=$selected;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=@($project.volumes).Count}
         return @{case=$Label;outcome='attached_and_selected';segment_id=$SegmentId;selected=$selected;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=0}
     } catch {
-        try { Snapshot $appProcessId $directory 'failure' } catch { }
-        $_.ToString() | Set-Content -LiteralPath (Join-Path $directory 'failure.txt') -Encoding UTF8
-        throw
+        $originalFailure = $_
+        try { Snapshot $appProcessId $directory 'failure' $captureTarget -BestEffort }
+        catch { $_.ToString() | Set-Content -LiteralPath (Join-Path $directory 'failure-diagnostics-error.txt') -Encoding UTF8 }
+        $originalFailure.ToString() | Set-Content -LiteralPath (Join-Path $directory 'failure.txt') -Encoding UTF8
+        throw $originalFailure
     } finally { Close-OwnedApp }
 }
 
@@ -365,9 +456,6 @@ try {
     exit 0
 } catch {
     Write-Json @{status='stopped';utc=[DateTime]::UtcNow.ToString('o');error=$_.ToString();no_provisioning=$true} (Join-Path $EvidenceDirectory 'stopped.json')
-    if ($script:OwnedProcess) {
-        try { [void](Capture-OwnedWindow $script:OwnedProcess.Id (Join-Path $EvidenceDirectory 'stopped-owned-app.png')) } catch { }
-    }
     Close-OwnedApp
     Write-Error $_
     exit 1
