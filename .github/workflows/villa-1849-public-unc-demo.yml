@@ -1,0 +1,227 @@
+name: VC3D public scroll UNC attachment evidence
+run-name: VC3D public scroll UNC attachment ${{ github.sha }}
+
+# One bounded paired workload on an isolated evidence branch. Evidence/docs
+# changes elsewhere do not dispatch this job, and this workflow has no schedule.
+on:
+  push:
+    branches: [evidence/vesuvius1849-real-unc-20261004]
+    paths:
+      - .github/workflows/villa-1849-public-unc-demo.yml
+      - tools/villa1849_unc_ui.ps1
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: villa1849-public-unc-evidence
+  cancel-in-progress: false
+
+jobs:
+  paired-attachment:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check existing desktop and UNC access before downloading inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'villa1849-public-unc'
+          $evidence = Join-Path $work 'evidence'
+          $segment = Join-Path $work 'public-data/PHercParis4/outer_shell'
+          New-Item -ItemType Directory -Force $evidence, $segment | Out-Null
+          "VILLA1849_WORK=$work" >> $env:GITHUB_ENV
+          "VILLA1849_EVIDENCE=$evidence" >> $env:GITHUB_ENV
+          "VILLA1849_SEGMENT=$segment" >> $env:GITHUB_ENV
+          @{ operation='VESUVIUS1849-REAL-DATA-UI-9FC'; evidence_commit=$env:GITHUB_SHA;
+             scope='Source demonstration only; prize eligibility is not established.' } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'request.json') -Encoding utf8
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -File ./tools/villa1849_unc_ui.ps1 -PreflightOnly -SegmentDirectory $segment -EvidenceDirectory $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retrieve exact published installers and real public segment
+        env:
+          ARTIFACT_READ_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = $env:VILLA1849_WORK
+          $evidence = $env:VILLA1849_EVIDENCE
+          $headers = @{
+            Authorization = "Bearer $env:ARTIFACT_READ_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $manifest = [ordered]@{
+            schema = 'villa1849-public-unc-evidence/v1'
+            evidence_commit = $env:GITHUB_SHA
+            evidence_run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            baseline_source = 'c4902849470a2e4005c8492120007280f087d636'
+            accepted_merge_source = '0f7be4a4c9e449caad35537011502cc7ab7bc6fe'
+            contribution_head = 'da0a0c378cf2089debda2b3f3c324dccdb1f300b'
+            accepted_fix_blobs = @{
+              MenuActionController = '51c3b0e36328602fe99b24261fc58b4c1795d2d5'
+              UnifiedBrowserDialog = 'b51dd357b1e35e2f7893ae8b408ad7b281955d5e'
+              test_unified_browser_dialog = 'b5cd6d3e7cf52fbde2c68f54896888833b817548'
+            }
+            comparison = 'Standard installer snapshots, not pure-patch paired builds: published baseline versus accepted upstream merge, not the contribution-head binary. Relevant accepted fix blobs match the contribution head; unrelated revision differences remain.'
+            data_context = 'https://scrollprize.org/data_datasets'
+            data_attribution = 'https://scrollprize.org/data'
+            data_license = 'https://creativecommons.org/licenses/by-nc/4.0/'
+            scan_citation = 'Not established by the supplied segment metadata; no creator or scan ID inferred.'
+            eligibility = 'Source demonstration only; no prize-entry or eligibility claim.'
+            scope = 'Actual Windows GUI navigation and segment attachment over an existing local UNC share. No WSL, full geometry rendering, or reading-speed claim.'
+            installers = @()
+            data_files = @()
+          }
+          $manifestPath = Join-Path $evidence 'inputs.json'
+          function Save-Manifest {
+            $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+          }
+          Save-Manifest
+
+          function Save-ResponseBody($response, [string]$path, [long]$limit) {
+            $response.EnsureSuccessStatusCode() | Out-Null
+            $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $outputStream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
+            try {
+              $buffer = [byte[]]::new(1048576)
+              [long]$total = 0
+              while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $total += $count
+                if ($total -gt $limit) { throw 'Download exceeded the bounded input size.' }
+                $outputStream.Write($buffer, 0, $count)
+              }
+            } finally {
+              $outputStream.Dispose()
+              $inputStream.Dispose()
+            }
+          }
+
+          $specs = @(
+            @{ label='baseline'; id=10641884276L; run=35604800234L; job=106349161173L; checkout_line=209; artifact_line=16183; size=265928438L; commit='c4902849470a2e4005c8492120007280f087d636'; digest='27013b6d0ac70ad8e0100b96b1dc0364ba4c549197a0fb0044a3831a7a54a690' },
+            @{ label='accepted'; id=10772212388L; run=35907432015L; job=107338512413L; checkout_line=212; artifact_line=16288; size=266262995L; commit='0f7be4a4c9e449caad35537011502cc7ab7bc6fe'; digest='83743568d12d3b52c1809d72896829ef137a8b0bad9b79147d376a5f338219c1' }
+          )
+          $executables = @{}
+          foreach ($spec in $specs) {
+            $api = "https://api.github.com/repos/ScrollPrize/villa/actions/artifacts/$($spec.id)"
+            $meta = Invoke-RestMethod -Uri $api -Headers $headers
+            if ($meta.expired -or $meta.id -ne $spec.id -or $meta.workflow_run.id -ne $spec.run -or
+                $meta.workflow_run.head_sha -ne $spec.commit -or $meta.size_in_bytes -ne $spec.size -or
+                $meta.digest -ne "sha256:$($spec.digest)") {
+              throw "Published $($spec.label) artifact identity does not match the pinned input."
+            }
+            $manifest.installers += [ordered]@{
+              label=$spec.label; repository='ScrollPrize/villa'; artifact_id=$spec.id;
+              run_id=$spec.run; source_commit=$spec.commit; artifact_bytes=$spec.size;
+              artifact_sha256=$spec.digest; expires_at=$meta.expires_at;
+              actual_checkout_job="https://github.com/ScrollPrize/villa/actions/runs/$($spec.run)/job/$($spec.job)";
+              checkout_sha_log_line=$spec.checkout_line; artifact_receipt_log_line=$spec.artifact_line;
+              checkout_provenance='Existing native job log verified before publication: checkout SHA, linked VC3D.exe, cpack, and exact artifact upload.'
+            }
+            Save-Manifest
+            $folder = Join-Path $work $spec.label
+            New-Item -ItemType Directory -Force $folder | Out-Null
+            $archive = Join-Path $folder 'artifact.zip'
+            # Resolve the authorized API redirect without forwarding credentials
+            # to the artifact host. A denial stops the job; there is no fallback.
+            $handler = [System.Net.Http.HttpClientHandler]::new()
+            $handler.AllowAutoRedirect = $false
+            $apiClient = [System.Net.Http.HttpClient]::new($handler)
+            $apiClient.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $env:ARTIFACT_READ_TOKEN)
+            $apiClient.DefaultRequestHeaders.UserAgent.ParseAdd('villa1849-public-unc-evidence')
+            $apiClient.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github+json')
+            try {
+              $redirect = $apiClient.GetAsync("$api/zip", [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+              try {
+                if ([int]$redirect.StatusCode -ne 302) { throw "Artifact download authorization returned $([int]$redirect.StatusCode)." }
+                $location = $redirect.Headers.Location
+                if (-not $location.IsAbsoluteUri -or $location.Scheme -ne 'https') { throw 'Artifact redirect is not HTTPS.' }
+                $downloadClient = [System.Net.Http.HttpClient]::new()
+                $downloadClient.Timeout = [TimeSpan]::FromMinutes(5)
+                try {
+                  $response = $downloadClient.GetAsync($location, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                  try { Save-ResponseBody $response $archive ($spec.size + 1048576) } finally { $response.Dispose() }
+                } finally { $downloadClient.Dispose() }
+              } finally { $redirect.Dispose() }
+            } finally { $apiClient.Dispose(); $handler.Dispose() }
+            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $spec.digest) {
+              throw "Published $($spec.label) artifact checksum mismatch."
+            }
+            $outer = Join-Path $folder 'artifact'
+            Expand-Archive -LiteralPath $archive -DestinationPath $outer
+            $bundles = @(Get-ChildItem -LiteralPath $outer -Recurse -File -Filter 'VC3D-*-win64.zip')
+            if ($bundles.Count -ne 1) { throw "Expected one $($spec.label) portable package." }
+            $portable = Join-Path $folder 'portable'
+            Expand-Archive -LiteralPath $bundles[0].FullName -DestinationPath $portable
+            $apps = @(Get-ChildItem -LiteralPath $portable -Recurse -File -Filter 'VC3D.exe')
+            if ($apps.Count -ne 1) { throw "Expected one $($spec.label) application executable." }
+            $executables[$spec.label] = $apps[0].FullName
+            Write-Host "Verified published $($spec.label) installer at source $($spec.commit)."
+          }
+
+          $dataBase = 'https://dl.ash2txt.org/datasets/spiral_datasets/PHercParis4/outer_shell'
+          $dataClient = [System.Net.Http.HttpClient]::new()
+          $dataClient.Timeout = [TimeSpan]::FromMinutes(2)
+          try {
+            foreach ($name in @('meta.json', 'x.tif', 'y.tif', 'z.tif')) {
+              $url = "$dataBase/$name"
+              $target = Join-Path $env:VILLA1849_SEGMENT $name
+              $response = $dataClient.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+              try {
+                Save-ResponseBody $response $target $(if ($name -eq 'meta.json') { 65536 } else { 16777216 })
+                $manifest.data_files += [ordered]@{
+                  name=$name; url=$url; bytes=(Get-Item -LiteralPath $target).Length;
+                  sha256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant();
+                  etag=[string]$response.Headers.ETag; last_modified=[string]$response.Content.Headers.LastModified
+                }
+                Save-Manifest
+              } finally { $response.Dispose() }
+            }
+            $readmeUrl = 'https://scrollprize.org/data/datasets/spiral-input-PHercParis4-README.md'
+            $readmePath = Join-Path $evidence 'PHercParis4-official-README.md'
+            try {
+              $noticeResponse = $dataClient.GetAsync($readmeUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+              try { Save-ResponseBody $noticeResponse $readmePath 262144 } finally { $noticeResponse.Dispose() }
+              $manifest.attribution_readme = @{
+                url=$readmeUrl; status='retained'; bytes=(Get-Item -LiteralPath $readmePath).Length;
+                sha256=(Get-FileHash -LiteralPath $readmePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              }
+            } catch {
+              Remove-Item -LiteralPath $readmePath -ErrorAction SilentlyContinue
+              $manifest.attribution_readme = @{ url=$readmeUrl; status='unavailable'; error=$_.Exception.Message }
+              Write-Warning 'Official README could not be retained. Source/license links and unresolved scan citation remain explicit.'
+            }
+            Save-Manifest
+          } finally { $dataClient.Dispose() }
+          $segmentMeta = Get-Content -LiteralPath (Join-Path $env:VILLA1849_SEGMENT 'meta.json') -Raw | ConvertFrom-Json
+          if ($segmentMeta.format -ne 'tifxyz' -or $segmentMeta.type -ne 'seg' -or $segmentMeta.uuid -ne 's1_2um_outer') {
+            throw 'Public segment metadata does not match the source-reviewed input.'
+          }
+          $manifest.segment_metadata = $segmentMeta
+          Save-Manifest
+          "VILLA1849_BASELINE_EXE=$($executables.baseline)" >> $env:GITHUB_ENV
+          "VILLA1849_ACCEPTED_EXE=$($executables.accepted)" >> $env:GITHUB_ENV
+
+      - name: Capture one actual before and after attachment
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -File ./tools/villa1849_unc_ui.ps1 `
+            -BaselineExe $env:VILLA1849_BASELINE_EXE `
+            -AcceptedExe $env:VILLA1849_ACCEPTED_EXE `
+            -SegmentDirectory $env:VILLA1849_SEGMENT `
+            -EvidenceDirectory $env:VILLA1849_EVIDENCE `
+            -InputManifest (Join-Path $env:VILLA1849_EVIDENCE 'inputs.json')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve only demonstration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: villa1849-public-unc-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/villa1849-public-unc/evidence/
+          if-no-files-found: error
+          retention-days: 30
