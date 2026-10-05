@@ -145,9 +145,9 @@ function Get-ControlTypeName($Current) {
 }
 function Matches-ControlType($Current, [string]$Type) {
     if (!$Current -or !$Current.PSObject.Properties['ControlType']) { return $false }
-    $property = [Windows.Automation.ControlType].GetProperty($Type, [Reflection.BindingFlags]'Public,Static')
-    if (!$property) { throw "Unknown UI Automation control type: $Type" }
-    return $Current.ControlType -eq $property.GetValue($null, $null)
+    $field = [Windows.Automation.ControlType].GetField($Type, [Reflection.BindingFlags]'Public,Static')
+    if (!$field) { throw "Unknown UI Automation control type: $Type" }
+    return $Current.ControlType -eq $field.GetValue($null)
 }
 function Find-Control([int]$AppProcessId, [string]$Name, [string]$Type='', $Root=$null) {
     foreach ($element in (Get-OwnedElements $AppProcessId $Root)) {
