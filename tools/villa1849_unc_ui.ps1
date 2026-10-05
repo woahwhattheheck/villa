@@ -238,6 +238,95 @@ function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
     }
     Write-Json $rows.ToArray() $Path
 }
+function Get-UiIdentity($Element) {
+    try {
+        $c = $Element.Current
+        $value = $null
+        $valuePattern = $null
+        if ($Element.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$valuePattern)) {
+            try { $value = ([Windows.Automation.ValuePattern]$valuePattern).Current.Value } catch { }
+        }
+        return [ordered]@{
+            name=[string]$c.Name
+            automation_id=[string]$c.AutomationId
+            help_text=[string]$c.HelpText
+            value=[string]$value
+            type=(Get-ControlTypeName $c)
+            process_id=$c.ProcessId
+            native_handle=$c.NativeWindowHandle
+            offscreen=$c.IsOffscreen
+            enabled=$c.IsEnabled
+            bounds=$c.BoundingRectangle.ToString()
+        }
+    } catch [Windows.Automation.ElementNotAvailableException] { return $null }
+}
+function Find-ExactIdentityControl([int]$AppProcessId, [string]$Identity) {
+    foreach ($element in (Get-OwnedElements $AppProcessId)) {
+        $fields = Get-UiIdentity $element
+        if (!$fields -or $fields.offscreen) { continue }
+        if ($fields.name -ceq $Identity -or $fields.automation_id -ceq $Identity -or $fields.help_text -ceq $Identity -or $fields.value -ceq $Identity) {
+            return $element
+        }
+    }
+    return $null
+}
+function Save-UiTreeDiagnostic([int]$AppProcessId, [string]$Path, [int]$Limit=2000) {
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $walker = [Windows.Automation.TreeWalker]::RawViewWalker
+    $stack = New-Object System.Collections.Stack
+    foreach ($native in [Villa1849Native]::OwnedWindows($AppProcessId)) {
+        try {
+            $root = [Windows.Automation.AutomationElement]::FromHandle($native.Handle)
+            $stack.Push([ordered]@{element=$root;depth=0;parent_index=$null})
+        } catch [Windows.Automation.ElementNotAvailableException] { }
+    }
+    while ($stack.Count -gt 0 -and $rows.Count -lt $Limit) {
+        $entry = $stack.Pop()
+        $element = $entry.element
+        $fields = Get-UiIdentity $element
+        if (!$fields -or $fields.process_id -ne $AppProcessId) { continue }
+        $index = $rows.Count
+        $supported = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($pattern in @(
+            @{name='Invoke';id=[Windows.Automation.InvokePattern]::Pattern},
+            @{name='SelectionItem';id=[Windows.Automation.SelectionItemPattern]::Pattern},
+            @{name='Value';id=[Windows.Automation.ValuePattern]::Pattern},
+            @{name='ExpandCollapse';id=[Windows.Automation.ExpandCollapsePattern]::Pattern},
+            @{name='ScrollItem';id=[Windows.Automation.ScrollItemPattern]::Pattern}
+        )) {
+            $candidatePattern = $null
+            try {
+                if ($element.TryGetCurrentPattern($pattern.id, [ref]$candidatePattern)) { $supported.Add($pattern.name) }
+            } catch [Windows.Automation.ElementNotAvailableException] { }
+        }
+        $fields['index'] = $index
+        $fields['parent_index'] = $entry.parent_index
+        $fields['depth'] = $entry.depth
+        $fields['patterns'] = $supported.ToArray()
+        $rows.Add($fields)
+
+        if ($entry.depth -ge 30) { continue }
+        $children = New-Object 'System.Collections.Generic.List[object]'
+        try {
+            $child = $walker.GetFirstChild($element)
+            while ($child) {
+                $children.Add($child)
+                $child = $walker.GetNextSibling($child)
+            }
+        } catch [Windows.Automation.ElementNotAvailableException] { }
+        for ($i=$children.Count-1; $i -ge 0; $i--) {
+            $stack.Push([ordered]@{element=$children[$i];depth=($entry.depth+1);parent_index=$index})
+        }
+    }
+    Write-Json ([ordered]@{
+        process_id=$AppProcessId
+        generated_utc=[DateTime]::UtcNow.ToString('o')
+        tree_view='RawViewWalker'
+        element_limit=$Limit
+        truncated=($stack.Count -gt 0)
+        elements=$rows.ToArray()
+    }) $Path
+}
 function Snapshot([int]$AppProcessId, [string]$Directory, [string]$Label, $CaptureTarget=$null, [switch]$BestEffort) {
     $errors = New-Object 'System.Collections.Generic.List[object]'
     try {
@@ -418,7 +507,15 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             $panelMethod = 'native click on actual Volume Package button'
         }
         Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);method=$panelMethod;result='Awaiting actual segment row'}
-        $row = Wait-For { Find-Control $appProcessId $SegmentId } 'actual public segment row' 45
+        Start-Sleep -Milliseconds 750
+        Save-UiTreeDiagnostic $appProcessId (Join-Path $directory 'volume-package-panel-tree.initial.json')
+        try {
+            $row = Wait-For { Find-ExactIdentityControl $appProcessId $SegmentId } 'actual public segment identity in Name, AutomationId, HelpText, or Value' 45
+        } catch {
+            Save-UiTreeDiagnostic $appProcessId (Join-Path $directory 'volume-package-panel-tree.timeout.json')
+            Record 'segment_identity_not_exposed' @{segment_id=$SegmentId;searched_fields=@('Name','AutomationId','HelpText','Value');diagnostic='volume-package-panel-tree.timeout.json';result='No visible exact identity match; no heuristic click attempted'}
+            throw
+        }
         Focus-Window $main $appProcessId
         Click-Control $row $appProcessId
         $selected = Wait-For {
