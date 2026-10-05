@@ -133,12 +133,28 @@ function Get-OwnedElements([int]$AppProcessId, $Root=$null) {
     }
 }
 function Clean-Name([string]$Name) { return (($Name -split "`t",2)[0].Replace('&','') -replace '\.{3}$|\u2026$','').Trim() }
+function Get-ControlTypeName($Current) {
+    if (!$Current -or !$Current.PSObject.Properties['ControlType']) { return '' }
+    try {
+        $controlType = $Current.ControlType
+        if (!$controlType) { return '' }
+        $programmaticName = $controlType.PSObject.Properties['ProgrammaticName']
+        if ($programmaticName) { return [string]$programmaticName.Value }
+        return [string]$controlType
+    } catch { return '' }
+}
+function Matches-ControlType($Current, [string]$Type) {
+    if (!$Current -or !$Current.PSObject.Properties['ControlType']) { return $false }
+    $property = [Windows.Automation.ControlType].GetProperty($Type, [Reflection.BindingFlags]'Public,Static')
+    if (!$property) { throw "Unknown UI Automation control type: $Type" }
+    return $Current.ControlType -eq $property.GetValue($null, $null)
+}
 function Find-Control([int]$AppProcessId, [string]$Name, [string]$Type='', $Root=$null) {
     foreach ($element in (Get-OwnedElements $AppProcessId $Root)) {
         try {
             $current = $element.Current
             if ($current.IsOffscreen) { continue }
-            if ($Type -and $current.ControlType.ProgrammaticName -ne "ControlType.$Type") { continue }
+            if ($Type -and !(Matches-ControlType $current $Type)) { continue }
             if ((Clean-Name $current.Name) -eq $Name) { return $element }
         } catch [Windows.Automation.ElementNotAvailableException] { }
     }
@@ -217,7 +233,7 @@ function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
         try {
             $c = $element.Current
             if ($c.IsOffscreen) { continue }
-            $rows.Add([ordered]@{name=$c.Name;automation_id=$c.AutomationId;type=$c.ControlType.ProgrammaticName;process_id=$c.ProcessId;native_handle=$c.NativeWindowHandle;enabled=$c.IsEnabled;bounds=$c.BoundingRectangle.ToString()})
+            $rows.Add([ordered]@{name=$c.Name;automation_id=$c.AutomationId;type=(Get-ControlTypeName $c);process_id=$c.ProcessId;native_handle=$c.NativeWindowHandle;enabled=$c.IsEnabled;bounds=$c.BoundingRectangle.ToString()})
         } catch [Windows.Automation.ElementNotAvailableException] { }
     }
     Write-Json $rows.ToArray() $Path
