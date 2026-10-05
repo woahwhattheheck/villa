@@ -509,6 +509,10 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
         Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);method=$panelMethod;result='Awaiting actual segment row'}
         Start-Sleep -Milliseconds 750
         Save-UiTreeDiagnostic $appProcessId (Join-Path $directory 'volume-package-panel-tree.initial.json')
+        $reloadSurfaces = Wait-For { Find-Control $appProcessId 'Reload Surfaces' 'Button' } 'source-identified Reload Surfaces button' 10
+        Focus-Window $main $appProcessId
+        Click-Control $reloadSurfaces $appProcessId
+        Record 'reloaded_surface_tree' @{control_name=(Clean-Name $reloadSurfaces.Current.Name);method='native click on exact visible Reload Surfaces button';result='Awaiting actual segment row'}
         try {
             $row = Wait-For { Find-ExactIdentityControl $appProcessId $SegmentId } 'actual public segment identity in Name, AutomationId, HelpText, or Value' 45
         } catch {
