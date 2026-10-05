@@ -199,17 +199,17 @@ function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) 
     $allowedVolumeManager = $c.ControlType -eq [Windows.Automation.ControlType]::Group -and ([string]$c.AutomationId).EndsWith('dockWidgetVolumesContent.grpVolManager', [StringComparison]::Ordinal)
     if (!$allowedDialog -and !$allowedTree -and !$allowedVolumeManager) { throw 'Capture is restricted to operational project/attachment dialogs, the segment tree, or the exact Volume Package manager.' }
     $ancestor = $Target
-    $owned = $false
+    $captureWindowHandle = [IntPtr]::Zero
     for ($depth=0; $depth -lt 30 -and $ancestor; $depth++) {
         $handle = [IntPtr]$ancestor.Current.NativeWindowHandle
         if ($handle -ne [IntPtr]::Zero) {
             [uint32]$owner = 0
             [void][Villa1849Native]::GetWindowThreadProcessId($handle, [ref]$owner)
-            if ($owner -eq $AppProcessId) { $owned=$true; break }
+            if ($owner -eq $AppProcessId) { $captureWindowHandle=$handle; break }
         }
         $ancestor = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
     }
-    if (!$owned -or $c.IsOffscreen) { throw 'Capture target is not a visible owned application control.' }
+    if ($captureWindowHandle -eq [IntPtr]::Zero -or $c.IsOffscreen) { throw 'Capture target is not a visible owned application control.' }
     $desktop = [Windows.Forms.SystemInformation]::VirtualScreen
     $rect = $c.BoundingRectangle
     $left = [Math]::Max($desktop.Left, [Math]::Floor($rect.Left))
@@ -219,13 +219,41 @@ function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) 
     $width = [int]($right - $left)
     $height = [int]($bottom - $top)
     if ($width -lt 2 -or $height -lt 2) { throw 'Owned application bounds are outside the visible desktop.' }
-    $bitmap = New-Object Drawing.Bitmap($width, $height)
-    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+
+    # VC3D's Open Data Catalog is a separate process-owned top-level window.
+    # It can remain visible above the verified manager even after its Close
+    # action reports completion. Hide only that exact owned window during the
+    # allowlisted capture, then restore it without changing application state.
+    $hiddenCatalogs = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($native in [Villa1849Native]::OwnedWindows($AppProcessId)) {
+        if ($native.Handle -ne $captureWindowHandle -and $native.Title -ceq 'Open Data Catalog') {
+            [void][Villa1849Native]::ShowWindow($native.Handle, 0)
+            $hiddenCatalogs.Add([ordered]@{handle=$native.Handle;title=$native.Title})
+        }
+    }
     try {
-        $graphics.CopyFromScreen([int]$left, [int]$top, 0, 0, $bitmap.Size)
-        $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
-    } finally { $graphics.Dispose(); $bitmap.Dispose() }
-    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;scope='Actual operational dialog, segment tree, or exact Volume Package manager pixels only; no viewer/geometry capture'}
+        if ($hiddenCatalogs.Count -gt 0) {
+            [void](Wait-For {
+                foreach ($catalog in $hiddenCatalogs) {
+                    if (@([Villa1849Native]::OwnedWindows($AppProcessId) | Where-Object { $_.Handle -eq $catalog.handle }).Count -ne 0) { return $false }
+                }
+                return $true
+            } 'catalog hidden for allowlisted capture' 5)
+        }
+        [void][Villa1849Native]::ShowWindow($captureWindowHandle, 9)
+        [void][Villa1849Native]::SetForegroundWindow($captureWindowHandle)
+        [void](Wait-For { [Villa1849Native]::GetForegroundWindow() -eq $captureWindowHandle -and [Villa1849Native]::ForegroundProcessId() -eq $AppProcessId } 'exact capture window foreground' 5)
+
+        $bitmap = New-Object Drawing.Bitmap($width, $height)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try {
+            $graphics.CopyFromScreen([int]$left, [int]$top, 0, 0, $bitmap.Size)
+            $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
+        } finally { $graphics.Dispose(); $bitmap.Dispose() }
+    } finally {
+        foreach ($catalog in $hiddenCatalogs) { [void][Villa1849Native]::ShowWindow($catalog.handle, 5) }
+    }
+    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;temporarily_hidden_windows=@($hiddenCatalogs | ForEach-Object { $_.title });scope='Actual operational dialog, segment tree, or exact Volume Package manager pixels only; exact owned catalog windows hidden only during capture; no viewer/geometry capture'}
 }
 function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
     $rows = New-Object 'System.Collections.Generic.List[object]'
