@@ -400,7 +400,7 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
         } 'persisted real UNC segment attachment' 45)
         $captureTarget = $null
         Focus-Window $main $appProcessId
-        $volumePackage = Wait-For { Find-Control $appProcessId '▲ Volume Package' 'Button' $main } 'collapsed Volume Package control' 10
+        $volumePackage = Wait-For { Find-Control $appProcessId '▲ Volume Package' } 'collapsed Volume Package control' 10
         Click-Control $volumePackage $appProcessId
         Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);result='Awaiting actual segment row'}
         $row = Wait-For { Find-Control $appProcessId $SegmentId } 'actual public segment row' 45
