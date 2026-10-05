@@ -509,41 +509,119 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
         Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);method=$panelMethod;result='Awaiting actual segment row'}
         Start-Sleep -Milliseconds 750
         Save-UiTreeDiagnostic $appProcessId (Join-Path $directory 'volume-package-panel-tree.initial.json')
+        function Get-SurfaceTree([int]$ProcessId) {
+            foreach ($control in (Get-OwnedElements $ProcessId)) {
+                try {
+                    $current = $control.Current
+                    if ($current.IsOffscreen) { continue }
+                    if ($current.ControlType -ne [Windows.Automation.ControlType]::Tree) { continue }
+                    if (([string]$current.AutomationId).EndsWith('treeWidgetSurfaces')) { return $control }
+                } catch [Windows.Automation.ElementNotAvailableException] { }
+            }
+            return $null
+        }
+        function Get-SegmentationCombo([int]$ProcessId) {
+            foreach ($control in (Get-OwnedElements $ProcessId)) {
+                try {
+                    $current = $control.Current
+                    if ($current.IsOffscreen) { continue }
+                    if ($current.ControlType -ne [Windows.Automation.ControlType]::ComboBox) { continue }
+                    if (([string]$current.AutomationId).EndsWith('cmbSegmentationDir')) { return $control }
+                } catch [Windows.Automation.ElementNotAvailableException] { }
+            }
+            return $null
+        }
+        # The startup catalog is a separate top-level window and covers the dock.
+        # Dismiss it again before any Volume Package input so the click cannot land on the catalog.
+        Close-ObservedStartupCatalog $appProcessId $directory
+        Focus-Window $main $appProcessId
+        if (!(Get-SurfaceTree $appProcessId)) {
+            $toggle = Wait-For {
+                foreach ($control in (Get-OwnedElements $appProcessId)) {
+                    try {
+                        $current = $control.Current
+                        if (!$current.IsOffscreen -and ([string]$current.Name).EndsWith('Volume Package', [StringComparison]::Ordinal)) { return $control }
+                    } catch [Windows.Automation.ElementNotAvailableException] { }
+                }
+            } 'Volume Package toggle after catalog dismissal' 10
+            $invoke = $null
+            if ($toggle.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                ([Windows.Automation.InvokePattern]$invoke).Invoke()
+            } else { Click-Control $toggle $appProcessId }
+            Record 'reopened_volume_package_panel' @{reason='Surface tree was not visible after the first toggle'}
+        }
         $reloadSurfaces = Wait-For { Find-Control $appProcessId 'Reload Surfaces' 'Button' } 'source-identified Reload Surfaces button' 10
         Focus-Window $main $appProcessId
         Click-Control $reloadSurfaces $appProcessId
-        Record 'reloaded_surface_tree' @{control_name=(Clean-Name $reloadSurfaces.Current.Name);method='native click on exact visible Reload Surfaces button';result='Awaiting actual segment row'}
+        Record 'reloaded_surface_tree' @{control_name=(Clean-Name $reloadSurfaces.Current.Name);method='native click on exact visible Reload Surfaces button';result='Awaiting exposed segment registration'}
+        Start-Sleep -Milliseconds 750
+        Close-ObservedStartupCatalog $appProcessId $directory
+        if (!(Get-SurfaceTree $appProcessId)) {
+            Focus-Window $main $appProcessId
+            $toggle = Wait-For {
+                foreach ($control in (Get-OwnedElements $appProcessId)) {
+                    try {
+                        $current = $control.Current
+                        if (!$current.IsOffscreen -and ([string]$current.Name).EndsWith('Volume Package', [StringComparison]::Ordinal)) { return $control }
+                    } catch [Windows.Automation.ElementNotAvailableException] { }
+                }
+            } 'Volume Package toggle after reload' 10
+            $invoke = $null
+            if ($toggle.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                ([Windows.Automation.InvokePattern]$invoke).Invoke()
+            } else { Click-Control $toggle $appProcessId }
+            Record 'restored_volume_package_panel' @{reason='Reload left the Volume Package dock collapsed'}
+        }
+        $directoryLeaf = Split-Path -Leaf $UncPath.TrimEnd('\','/')
+        $registration = $null
         try {
-            $row = Wait-For { Find-ExactIdentityControl $appProcessId $SegmentId } 'actual public segment identity in Name, AutomationId, HelpText, or Value' 45
+            $registration = Wait-For {
+                $exact = Find-ExactIdentityControl $appProcessId $SegmentId
+                if ($exact) { return $exact }
+                $combo = Get-SegmentationCombo $appProcessId
+                if ($combo) {
+                    $shown = [string](Get-EditValue $combo)
+                    if ($shown -ceq $directoryLeaf -or $shown -ceq $SegmentId) { return $combo }
+                }
+                return $null
+            } 'actual public segment registration in the Volume Package dock' 45
         } catch {
             Save-UiTreeDiagnostic $appProcessId (Join-Path $directory 'volume-package-panel-tree.timeout.json')
-            Record 'segment_identity_not_exposed' @{segment_id=$SegmentId;searched_fields=@('Name','AutomationId','HelpText','Value');diagnostic='volume-package-panel-tree.timeout.json';result='No visible exact identity match; no heuristic click attempted'}
+            Record 'segment_identity_not_exposed' @{segment_id=$SegmentId;directory_leaf=$directoryLeaf;searched_fields=@('Name','AutomationId','HelpText','Value','cmbSegmentationDir');diagnostic='volume-package-panel-tree.timeout.json';result='No visible exact identity or segmentation-directory registration'}
             throw
         }
+        $registeredAs = if ($registration.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox) { Get-EditValue $registration } else { Clean-Name $registration.Current.Name }
+        Record 'observed_segment_registration' @{segment_id=$SegmentId;directory_leaf=$directoryLeaf;shown=$registeredAs;control_type=(Get-ControlTypeName $registration.Current);automation_id=$registration.Current.AutomationId;surface_row_exposed=($registeredAs -ceq $SegmentId)}
         Focus-Window $main $appProcessId
-        Click-Control $row $appProcessId
-        $selected = Wait-For {
-            $node = $row
-            for ($depth=0; $depth -lt 4 -and $node; $depth++) {
-                $pattern = $null
-                if ($node.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
-                    if (([Windows.Automation.SelectionItemPattern]$pattern).Current.IsSelected) { return $true }
+        $captureTarget = $registration
+        if ($registration.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox) {
+            $surfaceTree = Get-SurfaceTree $appProcessId
+            if ($surfaceTree) { $captureTarget = $surfaceTree }
+        } else {
+            Click-Control $registration $appProcessId
+            $selected = Wait-For {
+                $node = $registration
+                for ($depth=0; $depth -lt 4 -and $node; $depth++) {
+                    $pattern = $null
+                    if ($node.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+                        if (([Windows.Automation.SelectionItemPattern]$pattern).Current.IsSelected) { return $true }
+                    }
+                    $node = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
                 }
-                $node = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
+                return $false
+            } 'selected rendered segment row' 10
+            $captureTarget = $registration
+            for ($depth=0; $depth -lt 20 -and $captureTarget -and $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree; $depth++) {
+                $captureTarget = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($captureTarget)
             }
-            return $false
-        } 'selected rendered segment row' 10
-        $captureTarget = $row
-        for ($depth=0; $depth -lt 20 -and $captureTarget -and $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree; $depth++) {
-            $captureTarget = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($captureTarget)
         }
-        if (!$captureTarget -or $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree) { throw 'Selected segment has no identifiable operational tree for evidence capture.' }
+        if (!$captureTarget) { throw 'Segment registration has no identifiable operational control for evidence capture.' }
         Snapshot $appProcessId $directory '03-accepted-attached-selected' $captureTarget
         Copy-Item -LiteralPath $projectPath -Destination (Join-Path $directory 'project-after.json')
         $project = Read-Project $projectPath
         if (!(Is-Attached $project $UncPath)) { throw 'Persisted project changed after selection.' }
-        Record 'accepted_observed_attachment' @{segment_id=$SegmentId;selected=$selected;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=@($project.volumes).Count}
-        return @{case=$Label;outcome='attached_and_selected';segment_id=$SegmentId;selected=$selected;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=0}
+        Record 'accepted_observed_attachment' @{segment_id=$SegmentId;shown=$registeredAs;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=@($project.volumes).Count}
+        return @{case=$Label;outcome='attached_and_selected';segment_id=$SegmentId;shown=$registeredAs;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=0}
     } catch {
         $originalFailure = $_
         try { Snapshot $appProcessId $directory 'failure' $captureTarget -BestEffort }
