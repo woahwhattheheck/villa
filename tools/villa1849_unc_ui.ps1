@@ -399,6 +399,7 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             Is-Attached (Read-Project $projectPath) $UncPath
         } 'persisted real UNC segment attachment' 45)
         $captureTarget = $null
+        Close-ObservedStartupCatalog $appProcessId $directory
         Focus-Window $main $appProcessId
         $volumePackage = Wait-For {
             foreach ($control in (Get-OwnedElements $appProcessId)) {
@@ -408,8 +409,15 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
                 } catch [Windows.Automation.ElementNotAvailableException] { }
             }
         } 'collapsed Volume Package control' 10
-        Click-Control $volumePackage $appProcessId
-        Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);result='Awaiting actual segment row'}
+        $invoke = $null
+        if ($volumePackage.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+            ([Windows.Automation.InvokePattern]$invoke).Invoke()
+            $panelMethod = 'UI Automation InvokePattern on actual Volume Package button'
+        } else {
+            Click-Control $volumePackage $appProcessId
+            $panelMethod = 'native click on actual Volume Package button'
+        }
+        Record 'opened_volume_package_panel' @{control_name=(Clean-Name $volumePackage.Current.Name);method=$panelMethod;result='Awaiting actual segment row'}
         $row = Wait-For { Find-Control $appProcessId $SegmentId } 'actual public segment row' 45
         Focus-Window $main $appProcessId
         Click-Control $row $appProcessId
