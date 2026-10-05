@@ -196,7 +196,8 @@ function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) 
     $name = Clean-Name $c.Name
     $allowedDialog = $c.ControlType -eq [Windows.Automation.ControlType]::Window -and $name -in @('New Project','Attach Segments')
     $allowedTree = $c.ControlType -eq [Windows.Automation.ControlType]::Tree
-    if (!$allowedDialog -and !$allowedTree) { throw 'Capture is restricted to operational project/attachment dialogs or the segment tree.' }
+    $allowedVolumeManager = $c.ControlType -eq [Windows.Automation.ControlType]::Group -and ([string]$c.AutomationId).EndsWith('dockWidgetVolumesContent.grpVolManager', [StringComparison]::Ordinal)
+    if (!$allowedDialog -and !$allowedTree -and !$allowedVolumeManager) { throw 'Capture is restricted to operational project/attachment dialogs, the segment tree, or the exact Volume Package manager.' }
     $ancestor = $Target
     $owned = $false
     for ($depth=0; $depth -lt 30 -and $ancestor; $depth++) {
@@ -224,7 +225,7 @@ function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) 
         $graphics.CopyFromScreen([int]$left, [int]$top, 0, 0, $bitmap.Size)
         $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
-    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;scope='Actual operational dialog or segment-tree pixels only; no viewer/geometry capture'}
+    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;scope='Actual operational dialog, segment tree, or exact Volume Package manager pixels only; no viewer/geometry capture'}
 }
 function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
     $rows = New-Object 'System.Collections.Generic.List[object]'
@@ -531,6 +532,17 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             }
             return $null
         }
+        function Get-VolumePackageManager([int]$ProcessId) {
+            foreach ($control in (Get-OwnedElements $ProcessId)) {
+                try {
+                    $current = $control.Current
+                    if ($current.IsOffscreen) { continue }
+                    if ($current.ControlType -ne [Windows.Automation.ControlType]::Group) { continue }
+                    if (([string]$current.AutomationId).EndsWith('dockWidgetVolumesContent.grpVolManager')) { return $control }
+                } catch [Windows.Automation.ElementNotAvailableException] { }
+            }
+            return $null
+        }
         # The startup catalog is a separate top-level window and covers the dock.
         # Dismiss it again before any Volume Package input so the click cannot land on the catalog.
         Close-ObservedStartupCatalog $appProcessId $directory
@@ -591,15 +603,12 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
             throw
         }
         $registeredAs = if ($registration.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox) { Get-EditValue $registration } else { Clean-Name $registration.Current.Name }
-        Record 'observed_segment_registration' @{segment_id=$SegmentId;directory_leaf=$directoryLeaf;shown=$registeredAs;control_type=(Get-ControlTypeName $registration.Current);automation_id=$registration.Current.AutomationId;surface_row_exposed=($registeredAs -ceq $SegmentId)}
+        $surfaceRowExposed = $registration.Current.ControlType -ne [Windows.Automation.ControlType]::ComboBox -and $registeredAs -ceq $SegmentId
+        Record 'observed_segment_registration' @{segment_id=$SegmentId;directory_leaf=$directoryLeaf;shown=$registeredAs;control_type=(Get-ControlTypeName $registration.Current);automation_id=$registration.Current.AutomationId;surface_row_exposed=$surfaceRowExposed}
         Focus-Window $main $appProcessId
-        $captureTarget = $registration
-        if ($registration.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox) {
-            $surfaceTree = Get-SurfaceTree $appProcessId
-            if ($surfaceTree) { $captureTarget = $surfaceTree }
-        } else {
+        if ($surfaceRowExposed) {
             Click-Control $registration $appProcessId
-            $selected = Wait-For {
+            [void](Wait-For {
                 $node = $registration
                 for ($depth=0; $depth -lt 4 -and $node; $depth++) {
                     $pattern = $null
@@ -609,19 +618,26 @@ function Run-Case([string]$Label, [string]$Exe, [bool]$ShouldAttach, [string]$Un
                     $node = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
                 }
                 return $false
-            } 'selected rendered segment row' 10
+            } 'selected rendered segment row' 10)
             $captureTarget = $registration
             for ($depth=0; $depth -lt 20 -and $captureTarget -and $captureTarget.Current.ControlType -ne [Windows.Automation.ControlType]::Tree; $depth++) {
                 $captureTarget = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($captureTarget)
             }
+            $acceptedOutcome = 'attached_and_selected'
+        } else {
+            if ($registeredAs -cne $directoryLeaf) { throw 'The visible segmentation directory does not match the attached public input.' }
+            Close-ObservedStartupCatalog $appProcessId $directory
+            Focus-Window $main $appProcessId
+            $captureTarget = Wait-For { Get-VolumePackageManager $appProcessId } 'visible exact Volume Package manager' 10
+            $acceptedOutcome = 'attached_with_visible_segmentation_directory'
         }
         if (!$captureTarget) { throw 'Segment registration has no identifiable operational control for evidence capture.' }
-        Snapshot $appProcessId $directory '03-accepted-attached-selected' $captureTarget
+        Snapshot $appProcessId $directory '03-accepted-attached-registration' $captureTarget
         Copy-Item -LiteralPath $projectPath -Destination (Join-Path $directory 'project-after.json')
         $project = Read-Project $projectPath
-        if (!(Is-Attached $project $UncPath)) { throw 'Persisted project changed after selection.' }
-        Record 'accepted_observed_attachment' @{segment_id=$SegmentId;shown=$registeredAs;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=@($project.volumes).Count}
-        return @{case=$Label;outcome='attached_and_selected';segment_id=$SegmentId;shown=$registeredAs;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=0}
+        if (!(Is-Attached $project $UncPath)) { throw 'Persisted project changed after registration capture.' }
+        Record 'accepted_observed_attachment' @{segment_id=$SegmentId;shown=$registeredAs;surface_row_exposed=$surfaceRowExposed;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=@($project.volumes).Count}
+        return @{case=$Label;outcome=$acceptedOutcome;segment_id=$SegmentId;shown=$registeredAs;surface_row_exposed=$surfaceRowExposed;segments=@(Get-SegmentLocations $project);output_segments=$project.output_segments;volumes=0}
     } catch {
         $originalFailure = $_
         try { Snapshot $appProcessId $directory 'failure' $captureTarget -BestEffort }
@@ -666,7 +682,7 @@ try {
     }
     $baseline = Run-Case 'baseline' $BaselineExe $false $uncPath $fileUri $segmentId
     $accepted = Run-Case 'accepted-merge' $AcceptedExe $true $uncPath $fileUri $segmentId
-    Write-Json @{status='paired_gui_observation_complete';baseline=$baseline;accepted=$accepted;typed_uri=$fileUri;segment_id=$segmentId;scope='GUI attachment and selected surface registration; no scan volume, geometry rendering, WSL access, newly recovered text, prize eligibility or payment demonstrated.'} (Join-Path $EvidenceDirectory 'result.json')
+    Write-Json @{status='paired_gui_attachment_observation_complete';baseline=$baseline;accepted=$accepted;typed_uri=$fileUri;segment_id=$segmentId;scope='GUI attachment and visible segmentation-directory registration. A selected surface row is claimed only when accepted.surface_row_exposed is true; no scan volume, geometry rendering, WSL access, newly recovered text, prize eligibility or payment demonstrated.'} (Join-Path $EvidenceDirectory 'result.json')
     exit 0
 } catch {
     Write-Json @{status='stopped';utc=[DateTime]::UtcNow.ToString('o');error=$_.ToString();no_provisioning=$true} (Join-Path $EvidenceDirectory 'stopped.json')
