@@ -251,9 +251,14 @@ function Capture-OperationalControl([int]$AppProcessId, $Target, [string]$Path) 
             $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
         } finally { $graphics.Dispose(); $bitmap.Dispose() }
     } finally {
-        foreach ($catalog in $hiddenCatalogs) { [void][Villa1849Native]::ShowWindow($catalog.handle, 5) }
+        foreach ($catalog in $hiddenCatalogs) { [void][Villa1849Native]::ShowWindow($catalog.handle, 4) }
+        if ($hiddenCatalogs.Count -gt 0) {
+            [void][Villa1849Native]::ShowWindow($captureWindowHandle, 9)
+            [void][Villa1849Native]::SetForegroundWindow($captureWindowHandle)
+            [void](Wait-For { [Villa1849Native]::GetForegroundWindow() -eq $captureWindowHandle -and [Villa1849Native]::ForegroundProcessId() -eq $AppProcessId } 'capture window foreground restored after catalog' 5)
+        }
     }
-    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;temporarily_hidden_windows=@($hiddenCatalogs | ForEach-Object { $_.title });scope='Actual operational dialog, segment tree, or exact Volume Package manager pixels only; exact owned catalog windows hidden only during capture; no viewer/geometry capture'}
+    return @{process_id=$AppProcessId;left=$left;top=$top;width=$width;height=$height;control_name=$name;automation_id=$c.AutomationId;temporarily_hidden_windows=@($hiddenCatalogs | ForEach-Object { $_.title });scope='Actual operational dialog, segment tree, or exact Volume Package manager pixels only; exact owned catalog windows hidden only during capture and restored without activation; no viewer/geometry capture'}
 }
 function Save-UiSnapshot([int]$AppProcessId, [string]$Path) {
     $rows = New-Object 'System.Collections.Generic.List[object]'
